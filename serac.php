@@ -1,7 +1,7 @@
 <?php
 // vim: ts=3 sw=3 et
 if (!defined('BASEPATH'))
-   die('You are in a maze of twisty little passages, all alike.');
+   define('BASEPATH', realpath(dirname(__FILE__)));
 
 class Serac implements ArrayAccess
 {
@@ -10,66 +10,78 @@ class Serac implements ArrayAccess
    const DEFAULT_METHOD    = 'get';
    const DEFAULT_URI_MODE  = 'path_info';
 
+   protected static $instance;
+
    protected $uri;
    protected $method;
    protected $routing   = array();
-   protected $config    = 
+   protected $registry  = array();
+
+   protected static $valid_methods =
+      array(
+         'get', 'post', 'put', 'delete', 'head', 'options'
+      );
+
+   public $options = 
       array(
          'base_url'  => 'http://localhost',
          'uri_mode'  => Serac::DEFAULT_URI_MODE,
          'encoding'  => 'UTF-8'
       );
 
-   protected $registry = array();
+   protected function __construct() {}
 
-   protected $valid_methods =
-      array(
-         'get', 'post', 'put', 'delete', 'head', 'options'
-      );
-
-   public function __construct(array $config = NULL)
+   public static function initialize(array $options = NULL)
    {
-      spl_autoload_register(array('Serac', 'autoloadClass'));
-      if (is_array($config) && count($config))
-         $this->setConfig($config);
+      if (Serac::$instance instanceOf Serac)
+         return Serac::$instance;
+      else
+      {
+         Serac::$instance = new Serac;
 
-      $this->initialize();
+         spl_autoload_register(array(Serac::$instance, 'classLoader'));
+         if (is_array($options) && count($options))
+            Serac::$instance->setOptions($options);
+
+         if (ini_get('register_globals')) Serac::$instance->cleanupGlobals();
+
+         if (get_magic_quotes_gpc())
+         {
+            $_GET    = Serac::cleanupMagicQuotes($_GET);
+            $_POST   = Serac::cleanupMagicQuotes($_POST);
+            $_COOKIE = Serac::cleanupMagicQuotes($_COOKIE);
+         }
+
+         if (PHP_SAPI != 'cli')
+         {
+            Serac::$instance->method = strtolower(
+               Serac::getServerVar('HTTP_METHOD', Serac::DEFAULT_METHOD)
+            );
+
+            Serac::$instance->prepareURI();
+         }
+         else Serac::$instance->method = Serac::DEFAULT_METHOD;
+
+         mb_internal_encoding(Serac::$instance->getOptions('encoding', 'UTF-8'));
+
+         //set_exception_handler(array('Signal', 'handleException'));
+
+         $autoload = Serac::$instance->getOptions('autoload');
+         if (!empty($autoload)) Serac::$instance->register($autoload);
+
+         return Serac::$instance;
+      }
    }
 
-   protected function initialize()
+   public static function getInstance()
    {
-      if (ini_get('register_globals')) $this->cleanupGlobals();
-
-      if (get_magic_quotes_gpc())
-      {
-         $_GET    = Serac::cleanupMagicQuotes($_GET);
-         $_POST   = Serac::cleanupMagicQuotes($_POST);
-         $_COOKIE = Serac::cleanupMagicQuotes($_COOKIE);
-      }
-
-      if (PHP_SAPI != 'cli')
-      {
-         $this->method = strtolower(
-            Serac::getServerVar('HTTP_METHOD', Serac::DEFAULT_METHOD)
-         );
-
-         $this->prepareURI();
-      }
-      else $this->method = Serac::DEFAULT_METHOD;
-
-      if (!empty($this->config['encoding']))
-         mb_internal_encoding($this->config['encoding']);
-
-      if (!empty($this->config['autoload']) && is_array($this->config['autoload']))
-         $this->register($this->config['autoload']);
-
-      //set_exception_handler(array('Signal', 'handleException'));
+      return Serac::$instance;
    }
 
    protected function prepareURI()
    {
       $uri  = '';
-      $mode = $this->getConfig('uri_mode', Serac::DEFAULT_URI_MODE);
+      $mode = $this->getOptions('uri_mode', Serac::DEFAULT_URI_MODE);
       switch ($mode)
       {
          case 'request_uri':
@@ -78,7 +90,7 @@ class Serac implements ArrayAccess
             break;
 
          case 'query_string':
-            $uri = Serac::getQueryVar($this->getConfig('uri_param', 'uri'), '');
+            $uri = Serac::getQueryVar($this->getOptions('uri_param', 'uri'), '');
             break;
 
          case 'path_info':
@@ -120,16 +132,24 @@ class Serac implements ArrayAccess
       return($set);
    }
 
-   public static function autoloadClass($class)
+   public function classLoader($class)
    {
-      $file = str_replace('_', '/', strtolower($class));
+      $file = str_replace('_', DIRECTORY_SEPARATOR, strtolower($class));
 
-      if ($path = Serac::getFilePath($file))
+      $dirs = $this->getOptions('class_dir');
+      if (empty($dirs)) $dirs = array(NULL);
+      if (!is_array($dirs)) $dirs = array($dirs);
+
+      foreach ($dirs as $dir)
       {
-         require_once $path;
-         return(class_exists($class) || interface_exists($class));
+         if ($path = Serac::getFilePath($file, $dir))
+         {
+            require_once $path;
+            return(class_exists($class) || interface_exists($class));
+         }
       }
-      else return(FALSE);
+
+      return(FALSE);
    }
 
    public static function getFilePath(
@@ -155,10 +175,11 @@ class Serac implements ArrayAccess
 
    public static function includeFile(
       $_path,
+      $_dir = NULL,
       array $_param = NULL,
       $_required = FALSE)
    {  
-      $_found  = Serac::getFilePath($_path);
+      $_found  = Serac::getFilePath($_path, $_dir);
 
       if (!$_found)
       {
@@ -178,15 +199,15 @@ class Serac implements ArrayAccess
    }
 
    public function register(
-      $object,
+      $thing,
       $name = NULL,
       $force_register = FALSE)
    {
-      if (!is_array($object))
-         $this->registerObject($object, $name, $force_register);
+      if (!is_array($thing))
+         $this->registerObject($thing, $name, $force_register);
       else
       {
-         foreach ($object as $key => $val)
+         foreach ($thing as $key => $val)
             $this->registerObject(
                $val,
                (is_string($key) ? $key : NULL),
@@ -195,14 +216,14 @@ class Serac implements ArrayAccess
    }
 
    public function registerObject(
-      $object,
+      $thing,
       $name = NULL,
       $force_register = FALSE)
    {
       if (empty($name))
       {
-         if (is_string($object)) $name = $object;
-         else $name = get_class($object);
+         if (is_string($thing)) $name = $thing;
+         else $name = get_class($thing);
       }
 
       $name = strtolower($name);
@@ -212,11 +233,13 @@ class Serac implements ArrayAccess
          else unset($this->registry[$name]);
       }
 
-      if (is_string($object)) $object = new $object;
-      if (!is_object($object))
+      if (is_string($thing))
+         $thing = new $thing;
+
+      if (!is_object($thing))
          throw new Exception('Unable to register object');
 
-      $this->registry[$name] = $object;
+      $this->registry[$name] = $thing;
       return($this->registry[$name]);
    }
 
@@ -311,7 +334,7 @@ class Serac implements ArrayAccess
                      continue;
                   elseif ($method == '?')
                      $method_re[] = '[^:,]+';
-                  elseif (in_array($method, $this->valid_methods))
+                  elseif (in_array($method, Serac::$valid_methods))
                      $method_re[] = preg_quote($method);
                }
 
@@ -355,8 +378,6 @@ class Serac implements ArrayAccess
                   }
                }
 
-               $def['selector'] = $pattern;
-               $def['captured'] = $matches;
                if (isset($def['arguments']))
                   $def['arguments'] = explode('/', $def['arguments']);
             }
@@ -391,25 +412,26 @@ class Serac implements ArrayAccess
       return(isset($this->routing[$index]));
    }
 
-   public function setConfig()
+   public function setOptions()
    {
       $args = func_get_args();
       if (func_num_args() > 1)
-         $this->config[ ($args[0]) ] = $args[1];
+         $this->options[ ($args[0]) ] = $args[1];
       else
       {
          if (isset($args[0]) && is_array($args[0]))
          {
             foreach ($args[0] as $key => $val)
-               $this->config[$key] = $val;
+               $this->options[$key] = $val;
          }
          else return(FALSE);
       }
    }
 
-   public function getConfig($key, $default = NULL)
+   public function getOptions($key = NULL, $default = NULL)
    {
-      return(Serac::getValue($this->config, $key, $default));
+      if ($key === NULL) return($this->options);
+      return(Serac::getValue($this->options, $key, $default));
    }
 
    public static function getValue(array $set, $key, $default)

@@ -4,7 +4,7 @@ define('BASEPATH', realpath(dirname(__FILE__)));
 
 include 'serac.php';
 
-$system = new Serac;
+$system = Serac::initialize();
 
 // add some routes here
 

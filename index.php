@@ -1,4 +1,5 @@
 <?php
+// vim: et ts=3 sw=3
 define('EXT', '.php');
 define('DS', DIRECTORY_SEPARATOR);
 define('BASEPATH', realpath(dirname(__FILE__)).DS);

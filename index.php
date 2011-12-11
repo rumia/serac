@@ -4,12 +4,13 @@ define('BASEPATH', realpath(dirname(__FILE__)));
 
 include 'serac.php';
 
-$system = new Serac;
+$system = new Serac(array('base_path' => '..'));
 
 // add some routes here
 
-$system['*'] = function () {
-   echo 'Hellow World!';
+$system['*'] = array(
+   'class'  => 'Classes_Foo',
+   'function' => 'index'
 );
 
 $system->run();

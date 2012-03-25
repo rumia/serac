@@ -1,379 +1,294 @@
 <?php
 // vim: ts=3 sw=3 et
-if (!defined('BASEPATH'))
-   define('BASEPATH', realpath(dirname(__FILE__)));
+if (!defined('BASE_PATH'))
+   define('BASE_PATH', realpath(dirname(__FILE__)));
 
-class Serac implements ArrayAccess
+class serac
 {
-   const EXT               = '.php';
-   const VERSION           = '0.1a-m';
-   const DEFAULT_METHOD    = 'get';
-   const DEFAULT_URI_MODE  = 'path_info';
+   const EXT               = '.php',
+         VERSION           = '0.2',
+         DEFAULT_METHOD    = 'get';
 
-   protected static $instance;
-
-   protected $uri;
-   protected $method;
-   protected $routing   = array();
-   protected $registry  = array();
-
-   protected static $valid_methods =
+   public static $valid_methods =
       array(
-         'get', 'post', 'put', 'delete', 'head', 'options'
+         'get',   'post',
+         'put',   'delete',
+         'head',  'options'
       );
 
-   public $options = 
+   public $protocol  = NULL;
+   public $scheme    = NULL;
+   public $hostname  = NULL;
+   public $method    = self::DEFAULT_METHOD;
+   public $uri       = NULL;
+   public $routes    = array();
+   public $options   =
       array(
-         'base_url'  => 'http://localhost',
-         'uri_mode'  => Serac::DEFAULT_URI_MODE,
-         'encoding'  => 'UTF-8'
+         'base_url'              => '//localhost',
+         'encoding'              => 'utf-8',
+         'cleanup_superglobals'  => TRUE
       );
 
-   protected function __construct() {}
-
-   public static function initialize(array $options = NULL)
+   public function __construct(array $options = NULL)
    {
-      if (Serac::$instance instanceOf Serac)
-         return Serac::$instance;
-      else
+      if (!empty($options))
+         $this->options = array_merge($this->options, $options);
+
+      $pre_init = $this->get_option('pre_init');
+      if (!empty($pre_init) && is_callable($pre_init))
+         call_user_func_array($pre_init, array($this));
+
+      $this->initialize();
+
+      $post_init = $this->get_option('post_init');
+      if (!empty($post_init) && is_callable($post_init))
+         call_user_func_array($post_init, array($this));
+   }
+
+   protected function initialize()
+   {
+      if ($this->get_option('cleanup_superglobals'))
       {
-         Serac::$instance = new Serac;
+         if (ini_get('register_globals'))
+         {
+            if (isset($_REQUEST['GLOBALS']) || isset($_FILES['GLOBALS']))
+               exit(1);
 
-         spl_autoload_register(array(Serac::$instance, 'classLoader'));
-         if (is_array($options) && count($options))
-            Serac::$instance->setOptions($options);
-
-         if (ini_get('register_globals')) Serac::$instance->cleanupGlobals();
+            foreach (array($_ENV, $_GET, $_POST, $_COOKIE, $_SERVER) as $array)
+            {
+               foreach ($array as $key => $val)
+                  if (isset($GLOBALS[$key])) unset($GLOBALS[$key]);
+            }
+         }
 
          if (get_magic_quotes_gpc())
          {
-            $_GET    = Serac::cleanupMagicQuotes($_GET);
-            $_POST   = Serac::cleanupMagicQuotes($_POST);
-            $_COOKIE = Serac::cleanupMagicQuotes($_COOKIE);
+            $_GET    = self::cleanup_magic_quotes($_GET);
+            $_POST   = self::cleanup_magic_quotes($_POST);
+            $_COOKIE = self::cleanup_magic_quotes($_COOKIE);
          }
+      }
 
-         if (PHP_SAPI != 'cli')
+      if (PHP_SAPI == 'cli')
+      {
+         $this->protocol   = 'cli';
+         $this->scheme     = 'file';
+
+         $hostname = getenv('HOSTNAME');
+         if (strlen($hostname)) $this->hostname = $hostname;
+         else $this->hostname = 'localhost';
+
+         $method = strtolower(getenv('METHOD'));
+         if (strlen($method) && in_array($method, self::$valid_methods))
+            $this->method = $method;
+         else
+            $this->method = self::DEFAULT_METHOD;
+
+         $uri_mode = $this->get_option('uri_mode', 'parameter');
+
+         switch ($uri_mode)
          {
-            Serac::$instance->method = strtolower(
-               Serac::getServerVar('HTTP_METHOD', Serac::DEFAULT_METHOD)
-            );
+            case 'environment':
+               $var = self::get_value($this->options, 'uri_param', 'URI');
+               $this->uri = (string) getenv($var);
+               break;
 
-            Serac::$instance->prepareURI();
+            case 'parameter':
+            default:
+               global $argv, $argc;
+
+               $index = $this->get_option('uri_param', 1);
+               if ($index > 0 && $index < $argc) $this->uri = $argv[$index];
+               break;
          }
-         else Serac::$instance->method = Serac::DEFAULT_METHOD;
-
-         mb_internal_encoding(Serac::$instance->getOptions('encoding', 'UTF-8'));
-
-         //set_exception_handler(array('Signal', 'handleException'));
-
-         $autoload = Serac::$instance->getOptions('autoload');
-         if (!empty($autoload)) Serac::$instance->register($autoload);
-
-         return Serac::$instance;
       }
-   }
-
-   public static function getInstance()
-   {
-      return Serac::$instance;
-   }
-
-   protected function prepareURI()
-   {
-      $uri  = '';
-      $mode = $this->getOptions('uri_mode', Serac::DEFAULT_URI_MODE);
-      switch ($mode)
+      else
       {
-         case 'request_uri':
-            $uri = Serac::getServerVar('REQUEST_URI', '');
-            $uri = preg_replace('/(?:\?.*)?$/', '', $uri);
-            break;
+         $this->hostname = self::get_value($_SERVER, 'HTTP_HOST', 'localhost');
+         $this->protocol = strtolower(self::get_value(
+            $_SERVER, 'SERVER_PROTOCOL', 'http/1.1'
+         ));
 
-         case 'query_string':
-            $uri = Serac::getQueryVar($this->getOptions('uri_param', 'uri'), '');
-            break;
+         if (self::get_value($_SERVER, 'HTTPS', 'off') == 'on')
+            $this->scheme = 'https';
+         else
+            $this->scheme = 'http';
 
-         case 'path_info':
-            $uri = Serac::getServerVar('PATH_INFO', '');
-            break;
+         $method = self::get_value($_SERVER, 'HTTP_METHOD', self::DEFAULT_METHOD);
 
-         default:
-            throw new Exception('Unknown URI Mode: '.$mode);
+         if ($method == 'POST' && !empty($_POST['_method']))
+            $method = $_POST['_method'];
+
+         $method = strtolower($method);
+         if (in_array($method, self::$valid_methods))
+            $this->method = $method;
+         else
+            $this->method = self::DEFAULT_METHOD;
+
+         $uri_mode = $this->get_option('uri_mode', 'path_info');
+         switch ($uri_mode)
+         {
+            case 'request_uri':
+               $this->uri = self::get_value($_SERVER, 'REQUEST_URI', '');
+               $this->uri = preg_replace('/(?:\?/*)?$/', '', $this->uri);
+               break;
+
+            case 'query_string':
+               $var = $this->get_option('uri_param', 'uri');
+               $this->uri = self::get_value($_GET, $var, '');
+               break;
+
+            case 'path_info':
+            default:
+               if (isset($_SERVER['ORIG_PATH_INFO']))
+                  $this->uri = $_SERVER['ORIG_PATH_INFO'];
+               else
+                  $this->uri = self::get_value($_SERVER, 'PATH_INFO', '');
+               break;
+         }
       }
 
-      $this->uri = preg_replace('#/+#', '/', trim($uri, '/'));
+      $this->uri = preg_replace('#/+#', '/', trim($this->uri, '/'));
+      mb_internal_encoding($this->get_option('encoding', 'utf-8'));
+
+      $autoloader = $this->get_option('autoloader', array($this, 'load_class'));
+      if (is_callable($autoloader)) spl_autoload_register($autoloader);
    }
 
-   protected function cleanupGlobals()
+   public static function cleanup_magic_quotes(array $array)
    {
-      if (isset($_REQUEST['GLOBALS']) || isset($_FILES['GLOBALS']))
-      {
-         echo 'GLOBALS-ception.';
-         exit(1);
-      }
-
-      foreach (array($_ENV, $_GET, $_POST, $_COOKIE, $_SERVER) as $array)
-      {
-         foreach ($array as $key => $val)
-            if (isset($GLOBALS[$key])) unset($GLOBALS[$key]);
-      }
-   }
-
-   public static function cleanupMagicQuotes($set)
-   {
-      foreach ($set as $key => $value)
+      foreach ($array as $key => $value)
       {
          if (is_array($value))
-            $set[$key] = Serac::cleanupMagicQuotes($set);
+            $array[$key] = self::cleanup_magic_quotes($value);
          else
-            $set[$key] = stripslashes($value);
+            $array[$key] = stripslashes($value);
       }
-
-      return($set);
+      return $array;
    }
 
-   public function classLoader($class)
+   public static function get_value(array $array, $index, $default = FALSE)
    {
-      $file = str_replace('_', DIRECTORY_SEPARATOR, strtolower($class));
+      if (isset($array[$index]))
+         return $array[$index];
+      else
+         return $default;
+   }
 
-      $dirs = $this->getOptions('class_dir');
-      if (empty($dirs)) $dirs = array(NULL);
+   public function get_option($name, $default = FALSE)
+   {
+      return self::get_value($this->options, $name, $default);
+   }
+
+   public static function get_file_path($file, $dir = NULL, $ext = NULL)
+   {
+      $path =
+         rtrim(BASE_PATH, DIRECTORY_SEPARATOR).
+         DIRECTORY_SEPARATOR.
+         preg_replace(
+            '/'.preg_quote(DIRECTORY_SEPARATOR, '/').'+/',
+            DIRECTORY_SEPARATOR,
+            trim($dir.DIRECTORY_SEPARATOR.$file, DIRECTORY_SEPARATOR)
+         ).
+         self::EXT;
+
+      return (file_exists($path) ? $path : FALSE);
+   }
+
+   public function load_class($name)
+   {
+      $file = str_replace('_', DIRECTORY_SEPARATOR, strtolower($name));
+
+      $dirs = $this->get_option('class_dir');
       if (!is_array($dirs)) $dirs = array($dirs);
 
       foreach ($dirs as $dir)
       {
-         if ($path = Serac::getFilePath($file, $dir))
+         if ($path = self::get_file_path($file, $dir))
          {
             require_once $path;
-            return(class_exists($class) || interface_exists($class));
+            return (class_exists($name) || interface_exists($name));
          }
       }
 
-      return(FALSE);
-   }
-
-   public static function getFilePath(
-      $file,
-      $dir = NULL,
-      $ext = NULL)
-   {
-      if (is_array($file)) $file = implode(DIRECTORY_SEPARATOR, $file);
-
-      $path = 
-         rtrim(BASEPATH, DIRECTORY_SEPARATOR).
-         DIRECTORY_SEPARATOR.
-         preg_replace(
-            '/'.preg_quote(DIRECTORY_SEPARATOR, '/').'+/', DIRECTORY_SEPARATOR,
-            trim(
-               DIRECTORY_SEPARATOR.
-               $dir.DIRECTORY_SEPARATOR.$file,
-               DIRECTORY_SEPARATOR)).
-         Serac::EXT;
-
-      return(file_exists($path) ? $path : FALSE);
-   }
-
-   public static function includeFile(
-      $_path,
-      $_dir = NULL,
-      array $_param = NULL,
-      $_required = FALSE)
-   {  
-      $_found  = Serac::getFilePath($_path, $_dir);
-
-      if (!$_found)
-      {
-         if ($_required)
-         {
-            throw new Exception('No such file or directory: '.$_path);
-            exit(1);
-         }
-
-         return(FALSE);
-      }
-
-      if (is_array($_param) && count($_param) > 0)
-         extract($_param, EXTR_SKIP | EXTR_REFS);
-
-      return include $_found;
-   }
-
-   public function register(
-      $thing,
-      $name = NULL,
-      $force_register = FALSE)
-   {
-      if (!is_array($thing))
-         $this->registerObject($thing, $name, $force_register);
-      else
-      {
-         foreach ($thing as $key => $val)
-            $this->registerObject(
-               $val,
-               (is_string($key) ? $key : NULL),
-               $force_register);
-      }
-   }
-
-   public function registerObject(
-      $thing,
-      $name = NULL,
-      $force_register = FALSE)
-   {
-      if (empty($name))
-      {
-         if (is_string($thing)) $name = $thing;
-         else $name = get_class($thing);
-      }
-
-      $name = strtolower($name);
-      if (isset($this->registry[$name]))
-      {
-         if (!$force_register) return(NULL);
-         else unset($this->registry[$name]);
-      }
-
-      if (is_string($thing))
-         $thing = new $thing;
-
-      if (!is_object($thing))
-         throw new Exception('Unable to register object');
-
-      $this->registry[$name] = $thing;
-      return($this->registry[$name]);
+      return FALSE;
    }
 
    public function run()
    {
-      $found = $this->getMatchingRoute();
-      return($this->execute($found));
+      $found   = $this->get_matching_route();
+      $result  = $this->execute($found);
    }
 
-   protected function execute($routedef)
+   protected function execute($def)
    {
-      $callback = FALSE;
-      $args = array();
+      $callback   = FALSE;
+      $args       = array();
 
-      if ($routedef instanceOf Closure)
-         $callback = $routedef;
-      elseif (is_array($routedef))
+      if ($def instanceOf Closure)
       {
-         if (isset($routedef['arguments']) && is_array($routedef['arguments']))
-            $args = $routedef['arguments'];
+         $callback = $def;
+         $args = array($this);
+      }
+      elseif (is_array($def))
+      {
+         if (isset($def['arguments']) && is_array($def['arguments']))
+            $args = $def['arguments'];
 
-         if (isset($routedef['handler']))
-            $callback = $routedef['handler'];
-         elseif (!empty($routedef['function']))
+         if (!empty($def['function']))
          {
-            if (!empty($routedef['class']))
+            if (!empty($def['class']))
             {
-               $object = $this->registerObject($routedef['class']);
-               if (!method_exists($object, $routedef['function']))
-               {
-                  throw new Exception(
-                     sprintf('Method %s does not exist in class %s',
-                        $routedef['function'],
-                        $routedef['class'])
-                     );
-               }
-               else $callback = array($object, $routedef['function']);
+               $class   = $def['class'];
+               $object  = new $class($this);
+
+               if (method_exists($object, $def['function']))
+                  $callback = array($object, $def['function']);
             }
             else
             {
-               if (!function_exists($routedef['function']))
-                  throw new Exception('No such function: '.$routedef['function']);
-               else $callback = $routedef['function'];
+               array_unshift($args, $this);
+               if ($def['function'] instanceOf Closure ||
+                  (is_string($def['function']) &&
+                  function_exists($def['function'])))
+                  $callback = $def['function'];
             }
          }
-         else return(FALSE);
+         else return FALSE;
       }
-      else return(FALSE);
+      else return FALSE;
 
-      if (!is_callable($callback))
-         throw new Exception('Can not execute callback');
+      if (!is_callable($callback)) return FALSE;
 
-
-      return(call_user_func_array($callback, $args));
+      return call_user_func_array($callback, $args);
    }
 
-   public function setRoute()
+   protected function get_matching_route()
    {
-      $args = func_get_args();
-      if (func_num_args() > 1)
-         $this->routing[ ($args[0]) ] = $args[1];
-      else
+      $query = sprintf(
+         '%s:%s:%s:/%s',
+         $this->scheme,
+         $this->hostname,
+         $this->method,
+         $this->uri);
+
+      foreach ($this->routes as $glob => $def)
       {
-         if (isset($args[0]) && is_array($args[0]))
-         {
-            foreach ($args[0] as $uri => $handler)
-               $this->routing[$uri] = $handler;
-         }
-         else return(FALSE);
-      }
-   }
-
-   public function getMatchingRoute()
-   {
-      $query = sprintf('%s:/%s', $this->method, $this->uri);
-
-      foreach ($this->routing as $pattern => $def)
-      {
-         if (!preg_match('/^\{.+\}$/', $pattern))
-         {
-            $method_selector = '';
-            if (preg_match('/^([^:]+):(.*)/', $pattern, $matches))
-            {
-               $path    = $matches[2];
-               $methods = explode(',', $matches[1]);
-
-               $method_re = array();
-               foreach ($methods as $method)
-               {
-                  $method = trim($method);
-                  if ($method == '')
-                     continue;
-                  elseif ($method == '?')
-                     $method_re[] = '[^:,]+';
-                  elseif (in_array($method, Serac::$valid_methods))
-                     $method_re[] = preg_quote($method);
-               }
-
-               if (count($method_re) > 0)
-                  $method_selector = '('.implode('|', $method_re).')';
-            }
-            else $path = $pattern;
-
-            if ($method_selector == '') $method_selector = '([^:,]+)';
-            
-            $segments   = explode('/', trim($path, '/'));
-            $segment_re = array();
-            foreach ($segments as $segment)
-            {
-               switch ($segment)
-               {
-                  case '?': $segment_re[] = '(?:/([^/]+))'; break;
-                  case '*': $segment_re[] = '(?:/?(.*))?'; break 2;
-                  default : $segment_re[] = '/'.preg_quote($segment);
-               }
-            }
-
-            $regex = sprintf('{^%s:%s}',
-               $method_selector,
-               implode('', $segment_re));
-         }
-         else $regex = $pattern;
+         $regex = $this->compile_route($glob);
+         if ($regex === FALSE) continue;
 
          if (preg_match($regex, $query, $matches))
          {
+            $captured = array_slice($matches, 4);
             if (is_array($def))
             {
-               if (count($matches) > 1)
+               if (count($captured) > 0)
                {
                   foreach ($def as $key => $value)
                   {
                      $def[$key] = preg_replace(
-                        '/(?:\$(\d+))/e',
-                        'isset($matches[$1]) ? $matches[$1] : ""',
+                        '/(?:\$([a-z][a-z0-9_]+))/ie',
+                        'isset($captured["$1"]) ? $captured["$1"] : ""',
                         $value);
                   }
                }
@@ -382,92 +297,122 @@ class Serac implements ArrayAccess
                   $def['arguments'] = explode('/', $def['arguments']);
             }
 
-            return($def);
+            $this->routes[$glob] = $def;
+
+            return $this->routes[$glob];
          }
       }
 
-      return(NULL);
+      return NULL;
    }
 
-   public function offsetGet($index)
+   protected function compile_route($pattern)
    {
-      if ($index === NULL) return($this->routing);
-      else return(Serac::getValue($this->routing, $index, FALSE));
-   }
+      static $compiled = array();
 
-   public function offsetSet($index, $value)
-   {
-      if ($index === NULL) $this->setRoute($value);
-      else $this->setRoute($index, $value);
-   }
-
-   public function offsetUnset($index)
-   {
-      if (isset($this->routing[$index]))
-         unset($this->routing[$index]);
-   }
-
-   public function offsetExists($index)
-   {
-      return(isset($this->routing[$index]));
-   }
-
-   public function setOptions()
-   {
-      $args = func_get_args();
-      if (func_num_args() > 1)
-         $this->options[ ($args[0]) ] = $args[1];
-      else
+      if (!isset($compiled[$pattern]))
       {
-         if (isset($args[0]) && is_array($args[0]))
+         if (!preg_match('#^\{.*?\}$#', $pattern))
          {
-            foreach ($args[0] as $key => $val)
-               $this->options[$key] = $val;
+            $regex = FALSE;
+            $scheme = $host = $method = '';
+
+            if (preg_match('#^([^/]+)?(.*)$#', $pattern, $matches))
+            {
+               $parts = explode(':', trim($matches[1], ':'));
+
+               switch (count($parts))
+               {
+                  case 3:
+                     $method  = trim($parts[2]);
+                     $host    = trim($parts[1]);
+                     $scheme  = trim($parts[0]);
+                     break;
+
+                  case 2:
+                     $method  = trim($parts[1]);
+                     $host    = trim($parts[0]);
+                     break;
+
+                  case 1:
+                     $method  = trim($parts[0]);
+                     break;
+               }
+
+               $scheme_re  = $this->compile_prefix_part($scheme);
+               $host_re    = $this->compile_prefix_part($host);
+               $method_re  = $this->compile_prefix_part($method);
+               $path_re    = $this->compile_path($matches[2]);
+
+               $regex = sprintf(
+                  '{^(%s):(%s):(%s):%s}',
+                  $scheme_re,
+                  $host_re,
+                  $method_re,
+                  $path_re);
+            }
          }
-         else return(FALSE);
+         else $regex = $pattern;
+
+         $compiled[$pattern] = $regex;
       }
+
+      return $compiled[$pattern];
    }
 
-   public function getOptions($key = NULL, $default = NULL)
+   protected function compile_prefix_part($part)
    {
-      if ($key === NULL) return($this->options);
-      return(Serac::getValue($this->options, $key, $default));
+      if (mb_strlen($part) > 0 && $part !== '*')
+      {
+         if (strpos($part, ',') !== FALSE)
+         {
+            $list = explode(',', $part);
+            foreach ($list as $key => $value)
+               $list[$key] = preg_quote(trim($value), '/');
+
+            $regex = implode('|', $list);
+         }
+         else $regex = preg_quote($part, '/');
+      }
+      else $regex = '.+';
+
+      return $regex;
    }
 
-   public static function getValue(array $set, $key, $default)
+   protected function compile_path($path)
    {
-      return(isset($set[$key]) ? $set[$key] : $default);
+      $segments = explode('/', trim($path, '/'));
+      $res = array();
+
+      foreach ($segments as $segment)
+      {
+         if ($segment === '*')
+         {
+            $res[] = '(?:/([^/]+))';
+         }
+         elseif (strncmp($segment, '?', 1) === 0)
+         {
+            $name = substr($segment, 1);
+            if (!preg_match('/^[a-z][a-z0-9_]*$/i', $name))
+               $res[] = '/'.preg_quote($segment);
+            else
+               $res[] = '(?:/(?<'.$name.'>[^/]+))';
+         }
+         elseif ($segment === '~$')
+         {
+            $res[] = '(?:/?(.*))?';
+         }
+         else
+         {
+            $res[] = '/'.preg_quote($segment);
+         }
+      }
+
+      return implode('', $res);
    }
 
-   public static function getServerVar($key, $default = FALSE)
+   public function dispatch($pattern, $handler = NULL)
    {
-      return(Serac::getValue($_SERVER, $key, $default));
-   }
-
-   public static function getEnvVar($key, $default = FALSE)
-   {
-      return(Serac::getValue($_ENV, $key, $default));
-   }
-
-   public static function getQueryVar($key, $default = FALSE)
-   {
-      return(Serac::getValue($_GET, $key, $default));
-   }
-
-   public function __isset($name)
-   {
-      $name = strtolower($name);
-      return(isset($this->registry[$name]));
-   }
-
-   public function __get($name)
-   {
-      $name = strtolower($name);
-      return(!isset($this->registry[$name]) ? FALSE : $this->registry[$name]);
-   }
-
-   public function __set($name, $value)
-   {
-      $this->register($value, $name);
+      $this->routes[$pattern] = $handler;
    }
 }

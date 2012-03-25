@@ -41,6 +41,7 @@ class serac implements ArrayAccess
 
    protected function initialize()
    {
+      mb_internal_encoding($this->get_option('encoding', 'utf-8'));
       if ($this->get_option('cleanup_superglobals'))
       {
          if (ini_get('register_globals'))
@@ -143,7 +144,6 @@ class serac implements ArrayAccess
       }
 
       $this->uri = preg_replace('#/+#', '/', trim($this->uri, '/'));
-      mb_internal_encoding($this->get_option('encoding', 'utf-8'));
 
       $autoloader = $this->get_option('autoloader', array($this, 'load_class'));
       if (is_callable($autoloader)) spl_autoload_register($autoloader);
@@ -189,7 +189,7 @@ class serac implements ArrayAccess
             DIRECTORY_SEPARATOR,
             trim($dir.DIRECTORY_SEPARATOR.$file, DIRECTORY_SEPARATOR)
          ).
-         self::EXT;
+         (strlen($ext) ? $ext : self::EXT);
 
       return (file_exists($path) ? $path : FALSE);
    }
@@ -227,6 +227,8 @@ class serac implements ArrayAccess
          $post_exec = $this->get_option('post_exec');
          if (!empty($post_exec) && is_callable($post_exec))
             call_user_func_array($post_exec, array($this, $result));
+
+         return $result;
       }
    }
 

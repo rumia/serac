@@ -3,18 +3,12 @@
 if (!defined('BASE_PATH'))
    define('BASE_PATH', realpath(dirname(__FILE__)));
 
-class serac
+class serac implements ArrayAccess
 {
    const EXT               = '.php',
          VERSION           = '0.2',
-         DEFAULT_METHOD    = 'get';
-
-   public static $valid_methods =
-      array(
-         'get',   'post',
-         'put',   'delete',
-         'head',  'options'
-      );
+         DEFAULT_METHOD    = 'get',
+         VALID_METHODS     = '/^(?:get|post|put|delete|head|options)$/';
 
    public $protocol  = NULL;
    public $scheme    = NULL;
@@ -24,10 +18,10 @@ class serac
    public $routes    = array();
    public $options   =
       array(
-         'base_url'              => '//localhost',
          'encoding'              => 'utf-8',
          'cleanup_superglobals'  => TRUE
       );
+
 
    public function __construct(array $options = NULL)
    {
@@ -79,7 +73,7 @@ class serac
          else $this->hostname = 'localhost';
 
          $method = strtolower(getenv('METHOD'));
-         if (strlen($method) && in_array($method, self::$valid_methods))
+         if (preg_match(self::VALID_METHODS, $method))
             $this->method = $method;
          else
             $this->method = self::DEFAULT_METHOD;
@@ -114,13 +108,13 @@ class serac
          else
             $this->scheme = 'http';
 
-         $method = self::get_value($_SERVER, 'HTTP_METHOD', self::DEFAULT_METHOD);
+         $method = self::get_value($_SERVER, 'REQUEST_METHOD', self::DEFAULT_METHOD);
 
          if ($method == 'POST' && !empty($_POST['_method']))
             $method = $_POST['_method'];
 
          $method = strtolower($method);
-         if (in_array($method, self::$valid_methods))
+         if (preg_match(self::VALID_METHODS, $method))
             $this->method = $method;
          else
             $this->method = self::DEFAULT_METHOD;
@@ -180,6 +174,11 @@ class serac
       return self::get_value($this->options, $name, $default);
    }
 
+   public function set_option($name, $value)
+   {
+      $this->options[$name] = $value;
+   }
+
    public static function get_file_path($file, $dir = NULL, $ext = NULL)
    {
       $path =
@@ -216,8 +215,19 @@ class serac
 
    public function run()
    {
-      $found   = $this->get_matching_route();
-      $result  = $this->execute($found);
+      $found = $this->get_matching_route();
+      if (!empty($found))
+      {
+         $pre_exec = $this->get_option('pre_exec');
+         if (!empty($pre_exec) && is_callable($pre_exec))
+            call_user_func_array($pre_exec, array($this, $found));
+
+         $result = $this->execute($found);
+
+         $post_exec = $this->get_option('post_exec');
+         if (!empty($post_exec) && is_callable($post_exec))
+            call_user_func_array($post_exec, array($this, $result));
+      }
    }
 
    protected function execute($def)
@@ -413,6 +423,38 @@ class serac
 
    public function dispatch($pattern, $handler = NULL)
    {
-      $this->routes[$pattern] = $handler;
+      if (is_array($pattern))
+      {
+         foreach ($pattern as $key => $val)
+            $this->routes[$key] = $val;
+      }
+      elseif (!empty($handler))
+      {
+         $this->routes[$pattern] = $handler;
+      }
+      else return FALSE;
+   }
+
+   public function offsetGet($index)
+   {
+      return (isset($this->routes[$index]) ? $this->routes[$index] : FALSE);
+   }
+
+   public function offsetSet($index, $value)
+   {
+      if ($index === NULL)
+         $this->dispatch($value);
+      else
+         $this->dispatch($index, $value);
+   }
+
+   public function offsetExists($index)
+   {
+      return isset($this->routes[$index]);
+   }
+
+   public function offsetUnset($index)
+   {
+      unset($this->routes[$index]);
    }
 }

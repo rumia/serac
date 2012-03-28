@@ -253,7 +253,7 @@ class serac implements ArrayAccess
             if (!empty($def['class']))
             {
                $class      = $def['class'];
-               $classref   = new ReflectionClass($def['class']);
+               $classref   = new ReflectionClass($class);
 
                if (!$classref->hasMethod($def['function']))
                   return FALSE;
@@ -269,7 +269,7 @@ class serac implements ArrayAccess
                   elseif (is_string($class) && $classref->isInstantiable())
                   {
                      $object = $classref->newInstance($this);
-                     $callback = array($object, $args);
+                     $callback = array($object, $def['function']);
                   }
                }
                else return FALSE;

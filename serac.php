@@ -182,6 +182,8 @@ class serac implements ArrayAccess
 
    public static function get_file_path($file, $dir = NULL, $ext = NULL)
    {
+      if ($dir === '.') $dir = '';
+
       $path =
          rtrim(BASE_PATH, DIRECTORY_SEPARATOR).
          DIRECTORY_SEPARATOR.
@@ -252,8 +254,9 @@ class serac implements ArrayAccess
          {
             if (!empty($def['class']))
             {
-               $class      = $def['class'];
-               $classref   = new ReflectionClass($class);
+               $class = $def['class'];
+               if (!$this->load_class($class)) return FALSE;
+               $classref = new ReflectionClass($class);
 
                if (!$classref->hasMethod($def['function']))
                   return FALSE;
@@ -268,7 +271,7 @@ class serac implements ArrayAccess
                   }
                   elseif (is_string($class) && $classref->isInstantiable())
                   {
-                     $object = $classref->newInstance($this);
+                     $object = new $class($this);
                      $callback = array($object, $def['function']);
                   }
                }

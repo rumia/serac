@@ -8,20 +8,20 @@ class serac implements ArrayAccess
    const EXT               = '.php',
          VERSION           = '0.2',
          DEFAULT_METHOD    = 'get',
-         VALID_METHODS     = '|get|post|put|delete|head|options|';
+         VALID_METHODS     = '/^(?:get|post|put|delete|options)$/';
 
    public $protocol  = NULL;
    public $scheme    = NULL;
    public $hostname  = NULL;
    public $method    = self::DEFAULT_METHOD;
    public $uri       = NULL;
-   public $routes    = array();
-   public $current_route;
+   public $handlers  = array();
    public $options   =
       array(
          'encoding'              => 'utf-8',
          'cleanup_superglobals'  => TRUE
       );
+   public $current_handler;
 
 
    public function __construct(array $options = NULL)
@@ -75,7 +75,7 @@ class serac implements ArrayAccess
          else $this->hostname = 'localhost';
 
          $method = strtolower(getenv('METHOD'));
-         if (strpos(self::VALID_METHODS, '|'.$method.'|'))
+         if (preg_match(self::VALID_METHODS, $method))
             $this->method = $method;
          else
             $this->method = self::DEFAULT_METHOD;
@@ -116,7 +116,7 @@ class serac implements ArrayAccess
             $method = $_POST['_method'];
 
          $method = strtolower($method);
-         if (strpos(self::VALID_METHODS, '|'.$method.'|'))
+         if (preg_match(self::VALID_METHODS, $method))
             $this->method = $method;
          else
             $this->method = self::DEFAULT_METHOD;
@@ -218,14 +218,14 @@ class serac implements ArrayAccess
 
    public function run()
    {
-      $this->current_route = $this->get_matching_route();
-      if (!empty($this->current_route))
+      $this->current_handler = $this->get_matching_handler();
+      if (!empty($this->current_handler))
       {
          $pre_exec = $this->get_option('pre_exec');
          if (!empty($pre_exec) && is_callable($pre_exec))
-            call_user_func_array($pre_exec, array($this, $this->current_route));
+            call_user_func_array($pre_exec, array($this, $this->current_handler));
 
-         $result = $this->execute($this->current_route);
+         $result = $this->execute($this->current_handler);
 
          $post_exec = $this->get_option('post_exec');
          if (!empty($post_exec) && is_callable($post_exec))
@@ -233,12 +233,21 @@ class serac implements ArrayAccess
 
          return $result;
       }
+      else return $this->raise_signal('not-found');
    }
 
-   protected function execute($def)
+   public function raise_signal($name)
+   {
+      $handler = $this->get_matching_handler(NULL, NULL, '@'.$name, '/');
+      if (!empty($handler)) return $this->execute($handler, TRUE);
+   }
+
+   protected function execute($def, $give_up_on_error = FALSE)
    {
       $callback   = FALSE;
       $args       = array();
+
+      if (is_string($def)) $def = array('function' => $def);
 
       if ($def instanceOf Closure)
       {
@@ -255,11 +264,19 @@ class serac implements ArrayAccess
             if (!empty($def['class']))
             {
                $class = $def['class'];
-               if (!$this->load_class($class)) return FALSE;
+               if (!$this->load_class($class))
+               {
+                  if ($give_up_on_error) exit(1);
+                  return $this->raise_signal('not-found');
+               }
+
                $classref = new ReflectionClass($class);
 
                if (!$classref->hasMethod($def['function']))
-                  return FALSE;
+               {
+                  if ($give_up_on_error) exit(1);
+                  return $this->raise_signal('not-found');
+               }
 
                $methodref = $classref->getMethod($def['function']);
                if ($methodref->isPublic())
@@ -274,8 +291,19 @@ class serac implements ArrayAccess
                      $object = new $class($this);
                      $callback = array($object, $def['function']);
                   }
+
+                  $required_args = $methodref->getNumberOfRequiredParameters();
+                  if ($required_args > 0 && $required_args > count($args))
+                  {
+                     if ($give_up_on_error) exit(1);
+                     return $this->raise_signal('missing-args');
+                  }
                }
-               else return FALSE;
+               else
+               {
+                  if ($give_up_on_error) exit(1);
+                  return $this->raise_signal('not-allowed');
+               }
             }
             else
             {
@@ -291,30 +319,35 @@ class serac implements ArrayAccess
                   $callback = $def['function'];
                   array_unshift($args, $this);
                }
-               else return FALSE;
             }
          }
-         else return FALSE;
       }
-      else return FALSE;
 
-      if (!is_callable($callback)) return FALSE;
-
-      return call_user_func_array($callback, $args);
+      if (!is_callable($callback))
+      {
+         if ($give_up_on_error) exit(1);
+         return $this->raise_signal('not-found');
+      }
+      else return call_user_func_array($callback, $args);
    }
 
-   protected function get_matching_route()
+   protected function get_matching_handler(
+      $scheme = NULL,
+      $host = NULL,
+      $method = NULL,
+      $uri = NULL)
    {
       $query = sprintf(
          '%s:%s:%s:/%s',
-         $this->scheme,
-         $this->hostname,
-         $this->method,
-         $this->uri);
+         (isset($scheme)   ? $scheme   : $this->scheme),
+         (isset($host)     ? $host     : $this->hostname),
+         (isset($method)   ? $method   : $this->method),
+         (isset($uri)      ? $uri      : $this->uri)
+      );
 
-      foreach ($this->routes as $glob => $def)
+      foreach ($this->handlers as $glob => $def)
       {
-         $regex = $this->compile_route($glob);
+         $regex = $this->compile_selector($glob);
          if ($regex === FALSE) continue;
 
          if (preg_match($regex, $query, $matches))
@@ -337,15 +370,15 @@ class serac implements ArrayAccess
                   $def['arguments'] = explode('/', $def['arguments']);
             }
 
-            $this->routes[$glob] = $def;
-            return $this->routes[$glob];
+            $this->handlers[$glob] = $def;
+            return $this->handlers[$glob];
          }
       }
 
       return NULL;
    }
 
-   protected function compile_route($pattern)
+   protected function compile_selector($pattern)
    {
       $regex = FALSE;
       if (!preg_match('#^\{.*?\}$#', $pattern))
@@ -447,40 +480,40 @@ class serac implements ArrayAccess
       return $regex;
    }
 
-   public function route($pattern, $handler = NULL)
+   public function add_handler($pattern, $handler = NULL)
    {
       if (is_array($pattern))
       {
          foreach ($pattern as $key => $val)
-            $this->routes[$key] = $val;
+            $this->handlers[$key] = $val;
       }
       elseif (!empty($handler))
       {
-         $this->routes[$pattern] = $handler;
+         $this->handlers[$pattern] = $handler;
       }
       else return FALSE;
    }
 
    public function offsetGet($index)
    {
-      return (isset($this->routes[$index]) ? $this->routes[$index] : FALSE);
+      return (isset($this->handlers[$index]) ? $this->handlers[$index] : FALSE);
    }
 
    public function offsetSet($index, $value)
    {
       if ($index === NULL)
-         $this->route($value);
+         $this->add_handler($value);
       else
-         $this->route($index, $value);
+         $this->add_handler($index, $value);
    }
 
    public function offsetExists($index)
    {
-      return isset($this->routes[$index]);
+      return isset($this->handlers[$index]);
    }
 
    public function offsetUnset($index)
    {
-      unset($this->routes[$index]);
+      unset($this->handlers[$index]);
    }
 }

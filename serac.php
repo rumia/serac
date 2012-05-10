@@ -3,151 +3,172 @@
 if (!defined('BASE_PATH'))
    define('BASE_PATH', realpath(dirname(__FILE__)));
 
-class serac implements ArrayAccess
+class serac
 {
    const EXT               = '.php',
          VERSION           = '0.2',
          DEFAULT_METHOD    = 'get',
          VALID_METHODS     = '/^(?:get|post|put|delete|options)$/';
 
-   public $protocol  = NULL;
-   public $scheme    = NULL;
-   public $hostname  = NULL;
+   protected static $instance;
+   public $protocol  = null;
+   public $scheme    = null;
+   public $hostname  = null;
    public $method    = self::DEFAULT_METHOD;
-   public $uri       = NULL;
-   public $handlers  = array();
+   public $uri       = null;
+   public $routes    = array();
    public $options   =
       array(
          'encoding'              => 'utf-8',
-         'cleanup_superglobals'  => TRUE
+         'cleanup_superglobals'  => true
       );
-   public $current_handler;
 
+   public $current_route;
 
-   public function __construct(array $options = NULL)
+   protected function __construct() {}
+
+   public static function initialize(array $options = null)
    {
-      if (!empty($options))
-         $this->options = array_merge($this->options, $options);
-
-      $pre_init = $this->get_option('pre_init');
-      if (!empty($pre_init) && is_callable($pre_init))
-         call_user_func_array($pre_init, array($this));
-
-      $this->initialize();
-
-      $post_init = $this->get_option('post_init');
-      if (!empty($post_init) && is_callable($post_init))
-         call_user_func_array($post_init, array($this));
-   }
-
-   protected function initialize()
-   {
-      mb_internal_encoding($this->get_option('encoding', 'utf-8'));
-      if ($this->get_option('cleanup_superglobals'))
+      if (!self::$instance instanceOf serac)
       {
-         if (ini_get('register_globals'))
-         {
-            if (isset($_REQUEST['GLOBALS']) || isset($_FILES['GLOBALS']))
-               exit(1);
+         $serac = new serac;
 
-            foreach (array($_ENV, $_GET, $_POST, $_COOKIE, $_SERVER) as $array)
+         if (!empty($options))
+            $serac->options = array_merge($serac->options, $options);
+
+         $pre_init = self::get_value($serac->options, 'pre_init');
+         if (!empty($pre_init) && is_callable($pre_init))
+            call_user_func_array($pre_init, array($serac));
+
+         mb_internal_encoding(self::get_value($serac->options, 'encoding', 'utf-8'));
+         if (self::get_value($serac->options, 'cleanup_superglobals'))
+         {
+            if (ini_get('register_globals'))
             {
-               foreach ($array as $key => $val)
-                  if (isset($GLOBALS[$key])) unset($GLOBALS[$key]);
+               if (isset($_REQUEST['GLOBALS']) || isset($_FILES['GLOBALS']))
+                  exit(1);
+
+               foreach (array($_ENV, $_GET, $_POST, $_COOKIE, $_SERVER) as $array)
+               {
+                  foreach ($array as $key => $val)
+                     if (isset($GLOBALS[$key])) unset($GLOBALS[$key]);
+               }
+            }
+
+            if (get_magic_quotes_gpc())
+            {
+               $_GET    = self::cleanup_magic_quotes($_GET);
+               $_POST   = self::cleanup_magic_quotes($_POST);
+               $_COOKIE = self::cleanup_magic_quotes($_COOKIE);
             }
          }
 
-         if (get_magic_quotes_gpc())
+         if (PHP_SAPI == 'cli')
          {
-            $_GET    = self::cleanup_magic_quotes($_GET);
-            $_POST   = self::cleanup_magic_quotes($_POST);
-            $_COOKIE = self::cleanup_magic_quotes($_COOKIE);
+            $serac->protocol   = 'cli';
+            $serac->scheme     = 'file';
+
+            $hostname = getenv('HOSTNAME');
+            if (strlen($hostname))
+               $serac->hostname = $hostname;
+            else
+               $serac->hostname = 'localhost';
+
+            $method = strtolower(getenv('METHOD'));
+            if (preg_match(self::VALID_METHODS, $method))
+               $serac->method = $method;
+            else
+               $serac->method = self::DEFAULT_METHOD;
+
+            $uri_mode = self::get_value($serac->options, 'uri_mode', 'parameter');
+
+            switch ($uri_mode)
+            {
+               case 'environment':
+                  $var = self::get_value($serac->options, 'uri_param', 'URI');
+                  $serac->uri = (string) getenv($var);
+                  break;
+
+               case 'parameter':
+               default:
+                  global $argv, $argc;
+
+                  $index = self::get_value($serac->options, 'uri_param', 1);
+                  if ($index > 0 && $index < $argc) $serac->uri = $argv[$index];
+                  break;
+            }
          }
-      }
-
-      if (PHP_SAPI == 'cli')
-      {
-         $this->protocol   = 'cli';
-         $this->scheme     = 'file';
-
-         $hostname = getenv('HOSTNAME');
-         if (strlen($hostname)) $this->hostname = $hostname;
-         else $this->hostname = 'localhost';
-
-         $method = strtolower(getenv('METHOD'));
-         if (preg_match(self::VALID_METHODS, $method))
-            $this->method = $method;
          else
-            $this->method = self::DEFAULT_METHOD;
-
-         $uri_mode = $this->get_option('uri_mode', 'parameter');
-
-         switch ($uri_mode)
          {
-            case 'environment':
-               $var = self::get_value($this->options, 'uri_param', 'URI');
-               $this->uri = (string) getenv($var);
-               break;
+            $serac->hostname = self::get_value($_SERVER, 'HTTP_HOST', 'localhost');
+            $serac->protocol = 
+               strtolower(self::get_value($_SERVER, 'SERVER_PROTOCOL', 'http/1.1'));
 
-            case 'parameter':
-            default:
-               global $argv, $argc;
+            if (self::get_value($_SERVER, 'HTTPS', 'off') == 'on')
+               $serac->scheme = 'https';
+            else
+               $serac->scheme = 'http';
 
-               $index = $this->get_option('uri_param', 1);
-               if ($index > 0 && $index < $argc) $this->uri = $argv[$index];
-               break;
+            $method = self::get_value($_SERVER, 'REQUEST_METHOD', self::DEFAULT_METHOD);
+
+            if ($method == 'POST' && !empty($_POST['_method']))
+               $method = $_POST['_method'];
+
+            $method = strtolower($method);
+            if (preg_match(self::VALID_METHODS, $method))
+               $serac->method = $method;
+            else
+               $serac->method = self::DEFAULT_METHOD;
+
+            $uri_mode = self::get_value($serac->options, 'uri_mode', 'path_info');
+            switch ($uri_mode)
+            {
+               case 'request_uri':
+                  $serac->uri = self::get_value($_SERVER, 'REQUEST_URI', '');
+                  $serac->uri = preg_replace('/(?:\?/*)?$/', '', $serac->uri);
+                  break;
+
+               case 'query_string':
+                  $var = self::get_value($serac->options, 'uri_param', 'uri');
+                  $serac->uri = self::get_value($_GET, $var, '');
+                  break;
+
+               case 'path_info':
+               default:
+                  if (isset($_SERVER['ORIG_PATH_INFO']))
+                     $serac->uri = $_SERVER['ORIG_PATH_INFO'];
+                  else
+                     $serac->uri = self::get_value($_SERVER, 'PATH_INFO', '');
+                  break;
+            }
          }
+
+         $serac->uri = preg_replace('#/+#', '/', trim($serac->uri, '/'));
+
+         $autoloader = self::get_value(
+                           $serac->options,
+                           'autoloader',
+                           array('serac', 'load_class')
+                        );
+
+         if (is_callable($autoloader)) spl_autoload_register($autoloader);
+
+         $post_init = self::get_value($serac->options, 'post_init');
+         if (!empty($post_init) && is_callable($post_init))
+            call_user_func_array($post_init, array($serac));
+
+         self::$instance = $serac;
       }
+
+      return self::$instance;
+   }
+
+   public static function instance()
+   {
+      if (!self::$instance instanceOf serac)
+         return self::initialize();
       else
-      {
-         $this->hostname = self::get_value($_SERVER, 'HTTP_HOST', 'localhost');
-         $this->protocol = strtolower(self::get_value(
-            $_SERVER, 'SERVER_PROTOCOL', 'http/1.1'
-         ));
-
-         if (self::get_value($_SERVER, 'HTTPS', 'off') == 'on')
-            $this->scheme = 'https';
-         else
-            $this->scheme = 'http';
-
-         $method = self::get_value($_SERVER, 'REQUEST_METHOD', self::DEFAULT_METHOD);
-
-         if ($method == 'POST' && !empty($_POST['_method']))
-            $method = $_POST['_method'];
-
-         $method = strtolower($method);
-         if (preg_match(self::VALID_METHODS, $method))
-            $this->method = $method;
-         else
-            $this->method = self::DEFAULT_METHOD;
-
-         $uri_mode = $this->get_option('uri_mode', 'path_info');
-         switch ($uri_mode)
-         {
-            case 'request_uri':
-               $this->uri = self::get_value($_SERVER, 'REQUEST_URI', '');
-               $this->uri = preg_replace('/(?:\?/*)?$/', '', $this->uri);
-               break;
-
-            case 'query_string':
-               $var = $this->get_option('uri_param', 'uri');
-               $this->uri = self::get_value($_GET, $var, '');
-               break;
-
-            case 'path_info':
-            default:
-               if (isset($_SERVER['ORIG_PATH_INFO']))
-                  $this->uri = $_SERVER['ORIG_PATH_INFO'];
-               else
-                  $this->uri = self::get_value($_SERVER, 'PATH_INFO', '');
-               break;
-         }
-      }
-
-      $this->uri = preg_replace('#/+#', '/', trim($this->uri, '/'));
-
-      $autoloader = $this->get_option('autoloader', array($this, 'load_class'));
-      if (is_callable($autoloader)) spl_autoload_register($autoloader);
+         return self::$instance;
    }
 
    public static function cleanup_magic_quotes(array $array)
@@ -162,29 +183,22 @@ class serac implements ArrayAccess
       return $array;
    }
 
-   public static function get_value(array $array, $index, $default = FALSE)
+   public static function get_value(array $array, $index, $default = false)
    {
-      if (isset($array[$index]))
-         return $array[$index];
-      else
-         return $default;
+      return (isset($array[$index]) ? $array[$index] : $default);
    }
 
-   public function get_option($name, $default = FALSE)
+   public static function get_option($name, $default = false)
    {
-      return self::get_value($this->options, $name, $default);
+      return self::get_value(self::instance()->options, $name, $default);
    }
 
-   public function set_option($name, $value)
-   {
-      $this->options[$name] = $value;
-   }
-
-   public static function get_file_path($file, $dir = NULL, $ext = NULL)
+   public static function get_file_path($file, $dir = null, $ext = null)
    {
       if ($dir === '.') $dir = '';
 
-      $path =
+      $path = realpath
+      (
          rtrim(BASE_PATH, DIRECTORY_SEPARATOR).
          DIRECTORY_SEPARATOR.
          preg_replace(
@@ -192,59 +206,64 @@ class serac implements ArrayAccess
             DIRECTORY_SEPARATOR,
             trim($dir.DIRECTORY_SEPARATOR.$file, DIRECTORY_SEPARATOR)
          ).
-         (strlen($ext) ? $ext : self::EXT);
+         (strlen($ext) ? $ext : self::EXT)
+      );
 
-      return (file_exists($path) ? $path : FALSE);
+      return (file_exists($path) ? $path : false);
    }
 
-   public function load_class($name)
+   public static function load_class($name)
    {
-      $file = str_replace('_', DIRECTORY_SEPARATOR, strtolower($name));
+      $file = str_replace(
+               array('_', '\\'),
+               DIRECTORY_SEPARATOR,
+               strtolower($name)
+            );
 
-      $dirs = $this->get_option('class_dir');
+      $dirs = self::get_option('class_dir');
       if (!is_array($dirs)) $dirs = array($dirs);
 
       foreach ($dirs as $dir)
       {
-         if ($path = self::get_file_path($file, $dir))
+         if (($path = self::get_file_path($file, $dir)) !== false)
          {
             require_once $path;
             return (class_exists($name) || interface_exists($name));
          }
       }
 
-      return FALSE;
+      return false;
    }
 
-   public function run()
+   public static function run()
    {
-      $this->current_handler = $this->get_matching_handler();
-      if (!empty($this->current_handler))
+      self::$instance->current_route = self::$instance->get_matching_handler();
+      if (!empty(self::$instance->current_route))
       {
-         $pre_exec = $this->get_option('pre_exec');
+         $pre_exec = self::get_option('pre_exec');
          if (!empty($pre_exec) && is_callable($pre_exec))
-            call_user_func_array($pre_exec, array($this, $this->current_handler));
+            call_user_func_array($pre_exec);
 
-         $result = $this->execute($this->current_handler);
+         $result = self::$instance->execute(self::$instance->current_route);
 
-         $post_exec = $this->get_option('post_exec');
+         $post_exec = self::get_option('post_exec');
          if (!empty($post_exec) && is_callable($post_exec))
-            call_user_func_array($post_exec, array($this, $result));
+            call_user_func_array($post_exec, array($result));
 
          return $result;
       }
-      else return $this->raise_signal('not-found');
+      else return self::raise_signal('not-found');
    }
 
-   public function raise_signal($name)
+   public static function raise_signal($name)
    {
-      $handler = $this->get_matching_handler(NULL, NULL, '@'.$name, '/');
-      if (!empty($handler)) return $this->execute($handler, TRUE);
+      $handler = self::$instance->get_matching_handler(null, null, '@'.$name, '/');
+      if (!empty($handler)) return self::$instance->execute($handler, true);
    }
 
-   protected function execute($def, $give_up_on_error = FALSE)
+   protected function execute(&$def, $give_up_on_error = false)
    {
-      $callback   = FALSE;
+      $callback   = false;
       $args       = array();
 
       if (is_string($def)) $def = array('function' => $def);
@@ -264,10 +283,10 @@ class serac implements ArrayAccess
             if (!empty($def['class']))
             {
                $class = $def['class'];
-               if (!$this->load_class($class))
+               if (!self::load_class($class))
                {
                   if ($give_up_on_error) exit(1);
-                  return $this->raise_signal('not-found');
+                  return self::raise_signal('not-found');
                }
 
                $classref = new ReflectionClass($class);
@@ -275,50 +294,41 @@ class serac implements ArrayAccess
                if (!$classref->hasMethod($def['function']))
                {
                   if ($give_up_on_error) exit(1);
-                  return $this->raise_signal('not-found');
+                  return self::raise_signal('not-found');
                }
 
                $methodref = $classref->getMethod($def['function']);
                if ($methodref->isPublic())
                {
                   if ($methodref->isStatic())
-                  {
                      $callback = array($class, $def['function']);
-                     array_unshift($args, $this);
-                  }
                   elseif (is_string($class) && $classref->isInstantiable())
                   {
-                     $object = new $class($this);
-                     $callback = array($object, $def['function']);
+                     $def['object'] = new $class;
+                     $callback = array($def['object'], $def['function']);
                   }
 
                   $required_args = $methodref->getNumberOfRequiredParameters();
                   if ($required_args > 0 && $required_args > count($args))
                   {
                      if ($give_up_on_error) exit(1);
-                     return $this->raise_signal('missing-args');
+                     return self::raise_signal('missing-args');
                   }
                }
                else
                {
                   if ($give_up_on_error) exit(1);
-                  return $this->raise_signal('not-allowed');
+                  return self::raise_signal('not-allowed');
                }
             }
             else
             {
-               if
-               (
-                  $def['function'] instanceOf Closure ||
-                  (
-                     is_string($def['function']) &&
-                     function_exists($def['function'])
-                  )
-               )
-               {
+               $valid_closure    = ($def['function'] instanceOf Closure);
+               $valid_func_name  = (is_string($def['function']) &&
+                                    function_exists($def['function']));
+
+               if ($valid_closure || $valid_func_name)
                   $callback = $def['function'];
-                  array_unshift($args, $this);
-               }
             }
          }
       }
@@ -326,16 +336,16 @@ class serac implements ArrayAccess
       if (!is_callable($callback))
       {
          if ($give_up_on_error) exit(1);
-         return $this->raise_signal('not-found');
+         return self::raise_signal('not-found');
       }
       else return call_user_func_array($callback, $args);
    }
 
    protected function get_matching_handler(
-      $scheme = NULL,
-      $host = NULL,
-      $method = NULL,
-      $uri = NULL)
+      $scheme = null,
+      $host = null,
+      $method = null,
+      $uri = null)
    {
       $query = sprintf(
          '%s:%s:%s:/%s',
@@ -345,10 +355,10 @@ class serac implements ArrayAccess
          (isset($uri)      ? $uri      : $this->uri)
       );
 
-      foreach ($this->handlers as $glob => $def)
+      foreach ($this->routes as $glob => $def)
       {
          $regex = $this->compile_selector($glob);
-         if ($regex === FALSE) continue;
+         if ($regex === false) continue;
 
          if (preg_match($regex, $query, $matches))
          {
@@ -370,17 +380,17 @@ class serac implements ArrayAccess
                   $def['arguments'] = explode('/', $def['arguments']);
             }
 
-            $this->handlers[$glob] = $def;
-            return $this->handlers[$glob];
+            $this->routes[$glob] = $def;
+            return $this->routes[$glob];
          }
       }
 
-      return NULL;
+      return null;
    }
 
    protected function compile_selector($pattern)
    {
-      $regex = FALSE;
+      $regex = false;
       if (!preg_match('#^\{.*?\}$#', $pattern))
       {
          $scheme = $host = $method = '';
@@ -442,7 +452,7 @@ class serac implements ArrayAccess
    {
       if (mb_strlen($part) > 0 && $part !== '*')
       {
-         if (strpos($part, ',') !== FALSE)
+         if (strpos($part, ',') !== false)
          {
             $list = explode(',', $part);
             foreach ($list as $key => $value)
@@ -480,40 +490,17 @@ class serac implements ArrayAccess
       return $regex;
    }
 
-   public function add_handler($pattern, $handler = NULL)
+   public static function route($pattern, $handler = null)
    {
       if (is_array($pattern))
       {
          foreach ($pattern as $key => $val)
-            $this->handlers[$key] = $val;
+            self::$instance->routes[$key] = $val;
       }
       elseif (!empty($handler))
       {
-         $this->handlers[$pattern] = $handler;
+         self::$instance->routes[$pattern] = $handler;
       }
-      else return FALSE;
-   }
-
-   public function offsetGet($index)
-   {
-      return (isset($this->handlers[$index]) ? $this->handlers[$index] : FALSE);
-   }
-
-   public function offsetSet($index, $value)
-   {
-      if ($index === NULL)
-         $this->add_handler($value);
-      else
-         $this->add_handler($index, $value);
-   }
-
-   public function offsetExists($index)
-   {
-      return isset($this->handlers[$index]);
-   }
-
-   public function offsetUnset($index)
-   {
-      unset($this->handlers[$index]);
+      else return false;
    }
 }

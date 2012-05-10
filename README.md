@@ -1,11 +1,15 @@
 Barely Usable PHP Micro-framework
 
-    require "serac.php";
+#### Usage Example
 
-    $vaan = new serac;
+```php
+require "serac.php";
 
-    $vaan["/"] = function () {
-        echo "I'M CAPTAIN BASCH FON RONSENBURG OF DALMASCA!";
-    };
+serac::initialize();
+serac::route("/", function () {
+    echo "Run! Please, run!";
+});
 
-    $vaan->run();
+serac::run();
+
+```

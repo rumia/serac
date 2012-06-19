@@ -152,12 +152,11 @@ class serac
                         );
 
          if (is_callable($autoloader)) spl_autoload_register($autoloader);
+         self::$instance = $serac;
 
          $post_init = self::get_value($serac->options, 'post_init');
          if (!empty($post_init) && is_callable($post_init))
             call_user_func_array($post_init, array($serac));
-
-         self::$instance = $serac;
       }
 
       return self::$instance;
@@ -183,35 +182,6 @@ class serac
       return $array;
    }
 
-   public static function get_value(array $array, $index, $default = false)
-   {
-      return (isset($array[$index]) ? $array[$index] : $default);
-   }
-
-   public static function get_option($name, $default = false)
-   {
-      return self::get_value(self::instance()->options, $name, $default);
-   }
-
-   public static function get_file_path($file, $dir = null, $ext = null)
-   {
-      if ($dir === '.') $dir = '';
-
-      $path = realpath
-      (
-         rtrim(BASE_PATH, DIRECTORY_SEPARATOR).
-         DIRECTORY_SEPARATOR.
-         preg_replace(
-            '/'.preg_quote(DIRECTORY_SEPARATOR, '/').'+/',
-            DIRECTORY_SEPARATOR,
-            trim($dir.DIRECTORY_SEPARATOR.$file, DIRECTORY_SEPARATOR)
-         ).
-         (strlen($ext) ? $ext : self::EXT)
-      );
-
-      return (file_exists($path) ? $path : false);
-   }
-
    public static function load_class($name)
    {
       $file = str_replace(
@@ -225,7 +195,8 @@ class serac
 
       foreach ($dirs as $dir)
       {
-         if (($path = self::get_file_path($file, $dir)) !== false)
+         $path = self::get_file_path($file, $dir);
+         if ($path !== false)
          {
             require_once $path;
             return (class_exists($name) || interface_exists($name));
@@ -242,7 +213,7 @@ class serac
       {
          $pre_exec = self::get_option('pre_exec');
          if (!empty($pre_exec) && is_callable($pre_exec))
-            call_user_func_array($pre_exec);
+            call_user_func_array($pre_exec, array(self::$instance->current_route));
 
          $result = self::$instance->execute(self::$instance->current_route);
 
@@ -252,10 +223,10 @@ class serac
 
          return $result;
       }
-      else return self::raise_signal('not-found');
+      else return self::signal('not-found');
    }
 
-   public static function raise_signal($name)
+   public static function signal($name)
    {
       $handler = self::$instance->get_matching_handler(null, null, '@'.$name, '/');
       if (!empty($handler)) return self::$instance->execute($handler, true);
@@ -286,7 +257,7 @@ class serac
                if (!self::load_class($class))
                {
                   if ($give_up_on_error) exit(1);
-                  return self::raise_signal('not-found');
+                  return self::signal('class-not-found');
                }
 
                $classref = new ReflectionClass($class);
@@ -294,7 +265,7 @@ class serac
                if (!$classref->hasMethod($def['function']))
                {
                   if ($give_up_on_error) exit(1);
-                  return self::raise_signal('not-found');
+                  return self::signal('method-not-found');
                }
 
                $methodref = $classref->getMethod($def['function']);
@@ -312,13 +283,13 @@ class serac
                   if ($required_args > 0 && $required_args > count($args))
                   {
                      if ($give_up_on_error) exit(1);
-                     return self::raise_signal('missing-args');
+                     return self::signal('missing-args');
                   }
                }
                else
                {
                   if ($give_up_on_error) exit(1);
-                  return self::raise_signal('not-allowed');
+                  return self::signal('inaccessible-method');
                }
             }
             else
@@ -336,12 +307,12 @@ class serac
       if (!is_callable($callback))
       {
          if ($give_up_on_error) exit(1);
-         return self::raise_signal('not-found');
+         return self::signal('not-found');
       }
       else return call_user_func_array($callback, $args);
    }
 
-   protected function get_matching_handler(
+   public function get_matching_handler(
       $scheme = null,
       $host = null,
       $method = null,
@@ -502,5 +473,40 @@ class serac
          self::$instance->routes[$pattern] = $handler;
       }
       else return false;
+   }
+
+   public static function get_value(array $array, $index, $default = null)
+   {
+      return (isset($array[$index]) ? $array[$index] : $default);
+   }
+
+   public static function get_option($name, $default = false)
+   {
+      return self::get_value(self::instance()->options, $name, $default);
+   }
+
+   public static function set_option($name, $value)
+   {
+      $instance = self::instance();
+      $instance->options[$name] = $value;
+   }
+
+   public static function get_file_path($file, $dir = null, $ext = null)
+   {
+      if ($dir === '.') $dir = '';
+
+      $path = realpath
+      (
+         rtrim(BASE_PATH, DIRECTORY_SEPARATOR).
+         DIRECTORY_SEPARATOR.
+         preg_replace(
+            '/'.preg_quote(DIRECTORY_SEPARATOR, '/').'+/',
+            DIRECTORY_SEPARATOR,
+            trim($dir.DIRECTORY_SEPARATOR.$file, DIRECTORY_SEPARATOR)
+         ).
+         (isset($ext) ? $ext : self::EXT)
+      );
+
+      return (file_exists($path) ? $path : false);
    }
 }

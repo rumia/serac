@@ -6,7 +6,7 @@ if (!defined('BASE_PATH'))
 class serac
 {
    const EXT               = '.php',
-         VERSION           = '0.2',
+         VERSION           = '0.3',
          DEFAULT_METHOD    = 'get',
          VALID_METHODS     = '/^(?:get|post|put|delete|options)$/';
 

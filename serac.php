@@ -269,7 +269,7 @@ class serac
 
             if (isset($comparison_callback) && is_callable($comparison_callback))
             {
-               $result = call_user_func_array($comparison_callback, $glob, $def);
+               $result = call_user_func($comparison_callback, $glob, $def);
 
                if (!$result && $single_mode)
                   return false;

@@ -204,7 +204,6 @@ class serac
          }
       }
 
-      $y = TRUE;
       return false;
    }
 

@@ -143,13 +143,15 @@ class serac
             }
          }
 
-         $serac->uri = preg_replace('#/+#', '/', trim($serac->uri, '/'));
+         $serac->uri = preg_replace(
+                        array('#/+#', '#\$+#'),
+                        array('/', ''),
+                        trim($serac->uri, '/'));
 
          $autoloader = self::get_value(
-                           $serac->options,
-                           'autoloader',
-                           array('serac', 'load_class')
-                        );
+                        $serac->options,
+                        'autoloader',
+                        array('serac', 'load_class'));
 
          if (is_callable($autoloader)) spl_autoload_register($autoloader);
          self::$instance = $serac;
@@ -255,7 +257,7 @@ class serac
                      {
                         if (!is_string($value)) continue;
                         $def[$key] = preg_replace(
-                           '/(?:\$([a-z0-9_]+))/ie',
+                           '/(?:\$([a-z0-9]+))/ie',
                            'isset($matches["$1"]) ? $matches["$1"] : ""',
                            $value);
                      }
@@ -493,7 +495,7 @@ class serac
             $regex .= '(?:/([^/]+))';
          elseif (strncmp($segment, '?', 1) === 0)
          {
-            if (preg_match('/^(?:\?([a-z][a-z0-9_]*))$/i', $segment, $matches))
+            if (preg_match('/^(?:\?([a-z][a-z0-9]*))$/i', $segment, $matches))
                $regex .= '(?:/(?<' . $matches[1] . '>[^/]+))';
             else
                $regex .= '/' . preg_quote($segment);

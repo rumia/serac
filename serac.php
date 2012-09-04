@@ -304,15 +304,7 @@ class serac
       $callback   = false;
       $args       = array();
 
-      if (is_string($def))
-      {
-         if (preg_match('/^([^:]+)::(.+)$/', $def, $def_parts))
-            $def = array('class' => $def_parts[1], 'function' => $def_parts[2]);
-         else
-            $def = array('function' => $def);
-      }
-
-      if ($def instanceOf Closure)
+      if (is_string($def) || $def instanceOf Closure)
       {
          $callback = $def;
          $args = array($this);
@@ -330,52 +322,13 @@ class serac
                if (!self::load_class($class))
                {
                   if ($is_signal) exit(1);
-                  return self::signal('class-not-found');
+                  return self::signal('not-found');
                }
 
-               $class_ref = new ReflectionClass($class);
-
-               if (!$class_ref->hasMethod($def['function']))
-               {
-                  if ($is_signal) exit(1);
-                  return self::signal('method-not-found');
-               }
-
-               $method_ref = $class_ref->getMethod($def['function']);
-
-               if ($method_ref->isPublic())
-               {
-                  $required_args = $method_ref->getNumberOfRequiredParameters();
-
-                  if ($required_args > 0 && $required_args > count($args))
-                  {
-                     if ($is_signal) exit(1);
-                     return self::signal('missing-args');
-                  }
-
-                  if ($method_ref->isStatic())
-                     $callback = array($class, $def['function']);
-                  elseif (is_string($class) && $class_ref->isInstantiable())
-                  {
-                     $def['object'] = new $class($this);
-                     $callback = array($def['object'], $def['function']);
-                  }
-               }
-               else
-               {
-                  if ($is_signal) exit(1);
-                  return self::signal('inaccessible-method');
-               }
+               $def['object'] = new $class($this);
+               $callback = array($def['object'], $def['function']);
             }
-            else
-            {
-               $valid_closure    = ($def['function'] instanceOf Closure);
-               $valid_func_name  = (is_string($def['function']) &&
-                                    function_exists($def['function']));
-
-               if ($valid_closure || $valid_func_name)
-                  $callback = $def['function'];
-            }
+            else $callback = $def['function'];
          }
       }
 
@@ -493,14 +446,14 @@ class serac
       {
          if ($segment === '*')
             $regex .= '(?:/([^/]+))';
-         elseif (strncmp($segment, '?', 1) === 0)
+         elseif (strncmp($segment, '$', 1) === 0)
          {
-            if (preg_match('/^(?:\?([a-z][a-z0-9]*))$/i', $segment, $matches))
+            if (preg_match('/^(?:\$([a-z][a-z0-9]*))$/i', $segment, $matches))
                $regex .= '(?:/(?<' . $matches[1] . '>[^/]+))';
             else
                $regex .= '/' . preg_quote($segment);
          }
-         elseif ($segment === '~$')
+         elseif ($segment === '~~')
             $regex .= '(?:/?(.*))?';
          else
             $regex .= '/' . preg_quote($segment);

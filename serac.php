@@ -1,29 +1,37 @@
 <?php
 // vim: ts=3 sw=3 et
 if (!defined('BASE_PATH'))
-   define('BASE_PATH', realpath(dirname(__FILE__)));
+{
+   if (!defined('__DIR__')) define('__DIR__', realpath(dirname(__FILE__)));
+   define('BASE_PATH', __DIR__);
+}
 
 class serac
 {
-   const EXT               = '.php',
-         VERSION           = '0.3',
-         DEFAULT_METHOD    = 'get',
-         VALID_METHODS     = '/^(?:get|post|put|delete|options)$/';
+   const EXT = '.php',
+         VERSION = '0.4',
+         DEFAULT_METHOD = 'GET';
 
    protected static $instance;
-   public $protocol  = null;
-   public $scheme    = null;
-   public $hostname  = null;
-   public $method    = self::DEFAULT_METHOD;
-   public $uri       = null;
-   public $routes    = array();
-   public $options   =
+   public $protocol = null;
+   public $scheme = null;
+   public $hostname = null;
+   public $method = self::DEFAULT_METHOD;
+   public $uri = null;
+   public $routes = array();
+   public $current_route;
+   public $options =
       array(
-         'encoding'              => 'utf-8',
-         'cleanup_superglobals'  => true
+         'encoding' => 'utf-8',
+         'cleanup_superglobals' => true
       );
 
-   public $current_route;
+   protected $valid_methods = array(
+      'GET' => true,
+      'POST' => true,
+      'PUT' => true,
+      'DELETE' => true
+   );
 
    protected function __construct() {}
 
@@ -32,126 +40,36 @@ class serac
       if (!self::$instance instanceOf serac)
       {
          $serac = new serac;
-
-         if (!empty($options))
-            $serac->options = $options + $serac->options;
-
+         if (!empty($options)) $serac->options = $options + $serac->options;
          $pre_init = self::get_value($serac->options, 'pre_init');
+
          if (!empty($pre_init) && is_callable($pre_init))
             call_user_func($pre_init, $serac);
 
-         mb_internal_encoding(self::get_value($serac->options, 'encoding', 'utf-8'));
-         if (self::get_value($serac->options, 'cleanup_superglobals'))
+         mb_internal_encoding(self::get_value(
+            $serac->options,
+            'encoding',
+            'utf-8'));
+
+         if (version_compare(PHP_VERSION, '5.3.0') < 0 &&
+            self::get_value($serac->options, 'cleanup_superglobals'))
          {
-            if (ini_get('register_globals'))
-            {
-               if (isset($_REQUEST['GLOBALS']) || isset($_FILES['GLOBALS']))
-                  exit(1);
-
-               foreach (array($_ENV, $_GET, $_POST, $_COOKIE, $_SERVER) as $array)
-               {
-                  foreach ($array as $key => $val)
-                     if (isset($GLOBALS[$key])) unset($GLOBALS[$key]);
-               }
-            }
-
-            if (get_magic_quotes_gpc())
-            {
-               $_GET    = self::cleanup_magic_quotes($_GET);
-               $_POST   = self::cleanup_magic_quotes($_POST);
-               $_COOKIE = self::cleanup_magic_quotes($_COOKIE);
-            }
+            self::cleanup_superglobals();
          }
 
-         if (PHP_SAPI == 'cli')
-         {
-            $serac->protocol   = 'cli';
-            $serac->scheme     = 'file';
+         if (PHP_SAPI == 'cli') $serac->init_cli();
+         else $serac->init_web(); // TODO: better name :)
 
-            $hostname = getenv('HOSTNAME');
-            if (strlen($hostname))
-               $serac->hostname = $hostname;
-            else
-               $serac->hostname = 'localhost';
-
-            $method = strtolower(getenv('METHOD'));
-            if (preg_match(self::VALID_METHODS, $method))
-               $serac->method = $method;
-            else
-               $serac->method = self::DEFAULT_METHOD;
-
-            $uri_mode = self::get_value($serac->options, 'uri_mode', 'parameter');
-
-            switch ($uri_mode)
-            {
-               case 'environment':
-                  $var = self::get_value($serac->options, 'uri_param', 'URI');
-                  $serac->uri = (string) getenv($var);
-                  break;
-
-               case 'parameter':
-               default:
-                  global $argv, $argc;
-
-                  $index = self::get_value($serac->options, 'uri_param', 1);
-                  if ($index > 0 && $index < $argc) $serac->uri = $argv[$index];
-                  break;
-            }
-         }
-         else
-         {
-            $serac->hostname = self::get_value($_SERVER, 'HTTP_HOST', 'localhost');
-            $serac->protocol = 
-               strtolower(self::get_value($_SERVER, 'SERVER_PROTOCOL', 'http/1.1'));
-
-            if (self::get_value($_SERVER, 'HTTPS', 'off') == 'on')
-               $serac->scheme = 'https';
-            else
-               $serac->scheme = 'http';
-
-            $method = self::get_value($_SERVER, 'REQUEST_METHOD', self::DEFAULT_METHOD);
-
-            if ($method == 'POST' && !empty($_POST['_method']))
-               $method = $_POST['_method'];
-
-            $method = strtolower($method);
-            if (preg_match(self::VALID_METHODS, $method))
-               $serac->method = $method;
-            else
-               $serac->method = self::DEFAULT_METHOD;
-
-            $uri_mode = self::get_value($serac->options, 'uri_mode', 'path_info');
-            switch ($uri_mode)
-            {
-               case 'request_uri':
-                  $serac->uri = self::get_value($_SERVER, 'REQUEST_URI', '');
-                  $serac->uri = preg_replace('/(?:\?/*)?$/', '', $serac->uri);
-                  break;
-
-               case 'query_string':
-                  $var = self::get_value($serac->options, 'uri_param', 'uri');
-                  $serac->uri = self::get_value($_GET, $var, '');
-                  break;
-
-               case 'path_info':
-               default:
-                  if (isset($_SERVER['ORIG_PATH_INFO']))
-                     $serac->uri = $_SERVER['ORIG_PATH_INFO'];
-                  else
-                     $serac->uri = self::get_value($_SERVER, 'PATH_INFO', '');
-                  break;
-            }
-         }
-
+         /* remove duplicate and trailing slashes */
          $serac->uri = preg_replace(
-                        array('#/+#', '#\$+#'),
-                        array('/', ''),
-                        trim($serac->uri, '/'));
+            array('#/+#', '#\$+#'),
+            array('/', ''),
+            trim($serac->uri, '/'));
 
          $autoloader = self::get_value(
-                        $serac->options,
-                        'autoloader',
-                        array('serac', 'load_class'));
+            $serac->options,
+            'autoloader',
+            array('serac', 'load_class'));
 
          if (is_callable($autoloader)) spl_autoload_register($autoloader);
          self::$instance = $serac;
@@ -162,6 +80,119 @@ class serac
       }
 
       return self::$instance;
+   }
+
+   public static function cleanup_superglobals()
+   {
+      if (ini_get('register_globals'))
+      {
+         if (isset($_REQUEST['GLOBALS']) || isset($_FILES['GLOBALS']))
+            exit(1);
+
+         foreach (array($_ENV, $_GET, $_POST, $_COOKIE, $_SERVER) as $array)
+         {
+            foreach ($array as $key => $val)
+               if (isset($GLOBALS[$key])) unset($GLOBALS[$key]);
+         }
+      }
+
+      if (get_magic_quotes_gpc())
+      {
+         $_GET    = self::cleanup_magic_quotes($_GET);
+         $_POST   = self::cleanup_magic_quotes($_POST);
+         $_COOKIE = self::cleanup_magic_quotes($_COOKIE);
+      }
+   }
+
+   protected function init_cli()
+   {
+      $this->protocol = 'CLI';
+      $this->scheme = 'file';
+
+      $hostname = getenv('HOSTNAME');
+      if (strlen($hostname))
+         $this->hostname = $hostname;
+      else
+         $this->hostname = 'localhost';
+
+      $method = getenv('METHOD');
+      if (isset($this->valid_methods[$method]) && $this->valid_methods[$method])
+         $this->method = $method;
+      else
+         $this->method = self::DEFAULT_METHOD;
+
+      $uri_mode = self::get_value($this->options, 'uri_mode', 'none');
+      switch ($uri_mode)
+      {
+         case 'environment':
+            /* use env value for uri
+             * eg:
+             *    > URI=/one/two/three script.php
+             *
+             * become:
+             *    script.php/one/two/three
+             */
+            $var = self::get_value($this->options, 'uri_param', 'URI');
+            $this->uri = (string) getenv($var);
+            break;
+
+         case 'parameter':
+            /* use command line argument for uri
+             * eg:
+             *    > script.php one two three
+             *
+             * become:
+             *    script.php/one/two/three
+             */
+            global $argv, $argc;
+
+            $index = self::get_value($this->options, 'uri_param', 1);
+            if ($index > 0 && $index < $argc) $this->uri = $argv[$index];
+            break;
+      }
+   }
+
+   protected function init_web()
+   {
+      $this->hostname = self::get_value($_SERVER, 'HTTP_HOST', 'localhost');
+      $this->protocol = self::get_value($_SERVER, 'SERVER_PROTOCOL', 'HTTP/1.1');
+
+      if (self::get_value($_SERVER, 'HTTPS', 'off') == 'on')
+         $this->scheme = 'https';
+      else
+         $this->scheme = 'http';
+
+      $method = self::get_value($_SERVER, 'REQUEST_METHOD', self::DEFAULT_METHOD);
+      if (isset($this->valid_methods[$method]) && $this->valid_methods[$method])
+         $this->method = $method;
+      else
+         $this->method = self::DEFAULT_METHOD;
+
+      $uri_mode = self::get_value($this->options, 'uri_mode', 'path_info');
+      switch ($uri_mode)
+      {
+         case 'request_uri':
+            $this->uri = preg_replace(
+               '/(?:\?/*)?$/',
+               '',
+               self::get_value($_SERVER, 'REQUEST_URI', ''));
+            break;
+
+         case 'query_string':
+            $this->uri = self::get_value(
+               $_GET,
+               self::get_value($this->options, 'uri_param', 'uri'),
+               '');
+            break;
+
+         case 'path_info':
+         default:
+            if (isset($_SERVER['ORIG_PATH_INFO']))
+               $this->uri = $_SERVER['ORIG_PATH_INFO'];
+            else
+               $this->uri = self::get_value($_SERVER, 'PATH_INFO', '');
+            break;
+      }
    }
 
    public static function instance()
@@ -202,11 +233,14 @@ class serac
          if ($path !== false)
          {
             require_once $path;
-            return (class_exists($name) || interface_exists($name));
+            if (class_exists($name) || interface_exists($name))
+               return true;
+            else
+               break;
          }
       }
 
-      return false;
+      throw new Exception('Class not found: ' . $name);
    }
 
    public function get_matching_handler(
@@ -222,6 +256,18 @@ class serac
          (isset($method)   ? $method   : $this->method),
          (isset($uri)      ? $uri      : $this->uri)
       );
+   }
+
+   /* No anonymous function for php < 5.3.
+    * And using /e flag for preg_replace is "considered bad" */
+   protected static $captures;
+   protected static function apply_captured_subpattern($matches)
+   {
+      $key = $matches[1];
+      if (isset(self::$captures[$key]))
+         return self::$captures[$key];
+      else
+         return '';
    }
 
    public static function find_matching_pattern(
@@ -253,14 +299,16 @@ class serac
                {
                   if (count($matches) > 1)
                   {
+                     self::$captures = $matches;
                      foreach ($def as $key => $value)
                      {
                         if (!is_string($value)) continue;
-                        $def[$key] = preg_replace(
-                           '/(?:\$([a-z0-9]+))/ie',
-                           'isset($matches["$1"]) ? $matches["$1"] : ""',
+                        $def[$key] = preg_replace_callback(
+                           '/(?:\$([a-z0-9]+))/i',
+                           array('serac', 'apply_captured_subpattern'),
                            $value);
                      }
+                     self::$captures = null;
                   }
 
                   if (isset($def['arguments']) && mb_strlen($def['arguments']))
@@ -301,8 +349,8 @@ class serac
 
    protected function execute(&$def, $is_signal = false)
    {
-      $callback   = false;
-      $args       = array();
+      $callback = false;
+      $args = array();
 
       if (is_string($def) || $def instanceOf Closure)
       {

@@ -12,6 +12,10 @@ class serac
          VERSION = '0.4',
          DEFAULT_METHOD = 'GET';
 
+   const ERR_NO_CLASS = 700,
+         ERR_NO_ROUTE = 701,
+         ERR_NOT_CALLABLE = 702;
+
    protected static $instance;
    public $protocol = null;
    public $scheme = null;
@@ -60,7 +64,7 @@ class serac
          if (PHP_SAPI == 'cli') $serac->init_cli();
          else $serac->init_web(); // TODO: better name :)
 
-         /* remove duplicate and trailing slashes */
+         // remove duplicate and trailing slashes
          $serac->uri = preg_replace(
             array('#/+#', '#\$+#'),
             array('/', ''),
@@ -235,12 +239,10 @@ class serac
             require_once $path;
             if (class_exists($name) || interface_exists($name))
                return true;
-            else
-               break;
          }
       }
 
-      throw new Exception('Class not found: ' . $name);
+      throw new Exception('Class not found: ' . $name, self::ERR_NO_CLASS);
    }
 
    public function get_matching_handler(
@@ -311,7 +313,7 @@ class serac
                      self::$captures = null;
                   }
 
-                  if (isset($def['arguments']) && mb_strlen($def['arguments']))
+                  if (isset($def['arguments']) && strlen($def['arguments']))
                      $def['arguments'] = explode('/', $def['arguments']);
                }
             }
@@ -336,76 +338,63 @@ class serac
    {
       self::$instance->current_route = self::$instance->get_matching_handler();
       if (!empty(self::$instance->current_route))
-         return self::$instance->execute(self::$instance->current_route);
+         return self::$instance->execute();
       else
-         return self::signal('not-found');
+      {
+         throw new Exception(
+            'No matching route for /' . self::$instance->uri,
+            self::ERR_NO_ROUTE);
+      }
    }
 
-   public static function signal($name)
-   {
-      $handler = self::$instance->get_matching_handler(null, null, '@'.$name, '');
-      if (!empty($handler)) return self::$instance->execute($handler, true);
-   }
-
-   protected function execute(&$def, $is_signal = false)
+   protected function execute()
    {
       $callback = false;
-      $args = array();
+      $args     = array();
+      $route    = $this->current_route;
 
-      if (is_string($def) || $def instanceOf Closure)
+      if (is_string($route) || $route instanceOf Closure)
       {
-         $callback = $def;
+         $callback = $route;
          $args = array($this);
       }
-      elseif (is_array($def))
+      elseif (is_array($route))
       {
-         if (isset($def['arguments']) && is_array($def['arguments']))
-            $args = $def['arguments'];
+         if (isset($route['arguments']) && is_array($route['arguments']))
+            $args = $route['arguments'];
 
-         if (!empty($def['function']))
+         if (!empty($route['function']))
          {
-            if (!empty($def['class']))
+            if (!empty($route['class']))
             {
-               $class = $def['class'];
-               if (!self::load_class($class))
-               {
-                  if ($is_signal) exit(1);
-                  return self::signal('not-found');
-               }
-
-               $def['object'] = new $class($this);
-               $callback = array($def['object'], $def['function']);
+               $class = $route['class'];
+               $object = new $class($this);
+               $callback = array($object, $route['function']);
             }
-            else $callback = $def['function'];
+            else $callback = $route['function'];
          }
       }
 
       if (!is_callable($callback))
       {
-         if ($is_signal) exit(1);
-         return self::signal('not-found');
+         throw new Exception(
+            'Route handler is not callable',
+            self::ERR_NOT_CALLABLE);
       }
       else
       {
-         if (!$is_signal)
-         {
-            $pre_exec = self::get_option('pre_exec');
-            if (!empty($pre_exec) && is_callable($pre_exec))
-               call_user_func($pre_exec, self::$instance->current_route);
-         }
+         $pre_exec = self::get_option('pre_exec');
+         if (!empty($pre_exec) && is_callable($pre_exec))
+            call_user_func($pre_exec, $this->current_route);
 
          $result = call_user_func_array($callback, $args);
 
-         if (!$is_signal)
-         {
-            $post_exec = self::get_option('post_exec');
-            if (!empty($post_exec) && is_callable($post_exec))
-               call_user_func($post_exec, $result);
-         }
+         $post_exec = self::get_option('post_exec');
+         if (!empty($post_exec) && is_callable($post_exec))
+            call_user_func($post_exec, $result);
 
          return $result;
       }
-
    }
 
    protected static function compile_selector($pattern)
@@ -439,11 +428,11 @@ class serac
 
             $scheme_re  = self::compile_prefix_part($scheme);
             $host_re    = self::compile_prefix_part($host);
-            $method_re  = self::compile_prefix_part($method, true);
+            $method_re  = self::compile_prefix_part($method);
             $path_re    = self::compile_path_part($matches[2]);
 
             $regex = sprintf(
-               '{^(?:%s):(?:%s):(?:%s):%s}',
+               '{^(?:%s):(?:%s):(?:%s):%s}i',
                $scheme_re,
                $host_re,
                $method_re,
@@ -460,7 +449,7 @@ class serac
       if (preg_match('/^((?:\*\.)+)?(.+)/', $pattern, $matches))
       {
          $regex =
-            str_replace('*.', '[^.]+\.', $matches[1]).
+            str_replace('*.', '[^.]+\.', $matches[1]) .
             preg_quote($matches[2], '/');
       }
       else $regex = preg_quote(trim($pattern), '/');
@@ -468,9 +457,9 @@ class serac
       return $regex;
    }
 
-   protected static function compile_prefix_part($part, $is_method = false)
+   protected static function compile_prefix_part($part)
    {
-      if (mb_strlen($part) > 0 && $part !== '*')
+      if (strlen($part) > 0 && $part !== '*')
       {
          if (strpos($part, ',') !== false)
          {
@@ -482,7 +471,7 @@ class serac
          }
          else $regex = self::compile_host_glob($part);
       }
-      else $regex = ($is_method ? '[^@]' : '') . '.+';
+      else $regex = '.+';
 
       return $regex;
    }

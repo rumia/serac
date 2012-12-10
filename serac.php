@@ -55,8 +55,7 @@ class serac
             'encoding',
             'utf-8'));
 
-         if (version_compare(PHP_VERSION, '5.3.0') < 0 &&
-            self::get_value($serac->options, 'cleanup_superglobals'))
+         if (self::get_value($serac->options, 'cleanup_superglobals'))
          {
             self::cleanup_superglobals();
          }
@@ -352,6 +351,7 @@ class serac
       $callback = false;
       $args     = array();
       $route    = $this->current_route;
+      $pre_exec = self::get_option('pre_exec');
 
       if (is_string($route) || $route instanceOf Closure)
       {
@@ -367,6 +367,9 @@ class serac
          {
             if (!empty($route['class']))
             {
+               if (!empty($pre_exec) && is_callable($pre_exec))
+                  call_user_func($pre_exec, $this->current_route);
+
                $class = $route['class'];
                $object = new $class($this);
                $callback = array($object, $route['function']);
@@ -383,10 +386,6 @@ class serac
       }
       else
       {
-         $pre_exec = self::get_option('pre_exec');
-         if (!empty($pre_exec) && is_callable($pre_exec))
-            call_user_func($pre_exec, $this->current_route);
-
          $result = call_user_func_array($callback, $args);
 
          $post_exec = self::get_option('post_exec');
@@ -490,6 +489,18 @@ class serac
             else
                $regex .= '/' . preg_quote($segment);
          }
+         elseif (strpos($segment, ',') !== false)
+         {
+            $list = explode(',', $segment);
+            foreach ($list as $key => $value)
+            {
+               $value = trim($value);
+               if ($value == '') continue;
+
+               $list[$key] = preg_quote($value);
+            }
+            $regex .= '(?:/(' . implode('|', $list) . '))';
+         }
          elseif ($segment === '~~')
             $regex .= '(?:/?(.*))?';
          else
@@ -533,7 +544,7 @@ class serac
    {
       if (isset($dir))
       {
-         if (strncmp($dir, DIRECTORY_SEPARATOR, 1) === false)
+         if (strncmp($dir, DIRECTORY_SEPARATOR, 1) !== 0)
          {
             $dir =
                BASE_PATH .

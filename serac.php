@@ -60,7 +60,8 @@ class serac
             self::cleanup_superglobals();
          }
 
-         if (PHP_SAPI == 'cli') $serac->init_cli();
+         $is_cli = self::get_value($serac->options, 'cli', false);
+         if (PHP_SAPI == 'cli' || $is_cli) $serac->init_cli();
          else $serac->init_web(); // TODO: better name :)
 
          // remove duplicate and trailing slashes
@@ -259,18 +260,6 @@ class serac
       );
    }
 
-   /* No anonymous function for php < 5.3.
-    * And using /e flag for preg_replace is "considered bad" */
-   protected static $captures;
-   protected static function apply_captured_subpattern($matches)
-   {
-      $key = $matches[1];
-      if (isset(self::$captures[$key]))
-         return self::$captures[$key];
-      else
-         return '';
-   }
-
    public static function find_matching_pattern(
       array $handlers,
       $scheme,
@@ -291,27 +280,12 @@ class serac
          if (preg_match($regex, $query, $matches))
          {
             if (isset($conversion_callback) && is_callable($conversion_callback))
-            {
                $def = call_user_func($conversion_callback, $glob, $def);
-            }
             else
             {
                if (is_array($def))
                {
-                  if (count($matches) > 1)
-                  {
-                     self::$captures = $matches;
-                     foreach ($def as $key => $value)
-                     {
-                        if (!is_string($value)) continue;
-                        $def[$key] = preg_replace_callback(
-                           '/(?:\$([a-z0-9]+))/i',
-                           array('serac', 'apply_captured_subpattern'),
-                           $value);
-                     }
-                     self::$captures = null;
-                  }
-
+                  if ($matches) $def = self::apply_matches($def, $matches);
                   if (isset($def['arguments']) && strlen($def['arguments']))
                      $def['arguments'] = explode('/', $def['arguments']);
                }
@@ -320,7 +294,6 @@ class serac
             if (isset($comparison_callback) && is_callable($comparison_callback))
             {
                $result = call_user_func($comparison_callback, $glob, $def);
-
                if (!$result && $single_mode)
                   return false;
             }
@@ -330,6 +303,21 @@ class serac
       }
 
       return null;
+   }
+
+   protected static function apply_matches(array $array, array $matches)
+   {
+      $replacements = array();
+      foreach ($matches as $key => $value)
+         $replacements['$' . $key] = $value;
+
+      foreach ($array as $key => $value)
+      {
+         if (!is_string($value)) continue;
+         $array[$key] = strtr($value, $replacements);
+      }
+
+      return $array;
    }
 
 
@@ -396,10 +384,10 @@ class serac
       }
    }
 
-   protected static function compile_selector($pattern)
+   public static function compile_selector($pattern)
    {
       $regex = false;
-      if (!preg_match('#^\{.*?\}$#', $pattern))
+      if (!preg_match('#^\{#', $pattern))
       {
          $scheme = $host = $method = '';
 
@@ -443,7 +431,7 @@ class serac
       return $regex;
    }
 
-   protected static function compile_host_glob($pattern)
+   public static function compile_host_glob($pattern)
    {
       if (preg_match('/^((?:\*\.)+)?(.+)/', $pattern, $matches))
       {
@@ -456,7 +444,7 @@ class serac
       return $regex;
    }
 
-   protected static function compile_prefix_part($part)
+   public static function compile_prefix_part($part)
    {
       if (strlen($part) > 0 && $part !== '*')
       {
@@ -475,7 +463,7 @@ class serac
       return $regex;
    }
 
-   protected static function compile_path_part($path)
+   public static function compile_path_part($path)
    {
       $regex = '';
       foreach (explode('/', trim($path, '/')) as $segment)
